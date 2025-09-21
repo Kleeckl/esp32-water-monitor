@@ -39,3 +39,20 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# PlatformIO
+.pio/
+.vscode/
+
+# ESP32 build files
+*.bin
+*.elf
+*.map
+
+# Backup files
+*.bak
+*.tmp
+
+# IDE files
+.vscode/
+.idea/
