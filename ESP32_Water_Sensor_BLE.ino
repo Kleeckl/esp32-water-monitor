@@ -201,12 +201,14 @@ void updateWaterQualityReadings() {
   
   // Read vibration data (includes simulation if MPU6050 not available)
   float vibration = readVibration();
+  float xAxis, yAxis, zAxis;
+  getVibrationAxes(xAxis, yAxis, zAxis);
   
   // Update LED status based on water quality
   updateStatusLED(quality);
   
   // Create JSON data
-  String jsonData = createJSONData(currentTDS, quality, vibration);
+  String jsonData = createJSONData(currentTDS, quality, vibration, xAxis, yAxis, zAxis);
   
   // Output to serial
   Serial.println(jsonData);
@@ -223,10 +225,15 @@ void updateWaterQualityReadings() {
   Serial.print(currentTDS);
   Serial.print(" ppm, Quality: ");
   Serial.print(getQualityString(quality));
-  if (mpuAvailable) {
-    Serial.print(", Vibration: ");
-    Serial.print(vibration);
-  }
+  Serial.print(", Vibration: ");
+  Serial.print(vibration);
+  Serial.print(" (X:");
+  Serial.print(xAxis);
+  Serial.print(", Y:");
+  Serial.print(yAxis);  
+  Serial.print(", Z:");
+  Serial.print(zAxis);
+  Serial.print(")");
   Serial.print(", BLE: ");
   Serial.println(deviceConnected ? "Connected" : "Disconnected");
 }
@@ -288,7 +295,7 @@ float readVibration() {
     static float simulatedVibration = 0.1;
     
     if (millis() - lastUpdate > 1000) { // Update every second
-      simulatedVibration = random(0, 50) / 100.0; // 0.0 to 0.5
+      simulatedVibration = random(5, 50) / 100.0; // 0.05 to 0.5
       lastUpdate = millis();
     }
     
@@ -308,6 +315,35 @@ float readVibration() {
   float vibration = abs(magnitude - 9.8);
   
   return vibration;
+}
+
+// Get individual axis vibration data
+void getVibrationAxes(float &xAxis, float &yAxis, float &zAxis) {
+  if (!mpuAvailable) {
+    // Generate simulated axis data
+    static unsigned long lastAxisUpdate = 0;
+    static float simX = 0.05, simY = 0.05, simZ = 0.05;
+    
+    if (millis() - lastAxisUpdate > 1000) {
+      simX = random(1, 25) / 100.0; // 0.01 to 0.25
+      simY = random(1, 25) / 100.0; // 0.01 to 0.25  
+      simZ = random(1, 25) / 100.0; // 0.01 to 0.25
+      lastAxisUpdate = millis();
+    }
+    
+    xAxis = simX;
+    yAxis = simY;
+    zAxis = simZ;
+    return;
+  }
+  
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  
+  // Get raw acceleration values and convert to vibration
+  xAxis = abs(a.acceleration.x);
+  yAxis = abs(a.acceleration.y);
+  zAxis = abs(a.acceleration.z - 9.8); // Subtract gravity from Z axis
 }
 
 void updateStatusLED(WaterQuality quality) {
@@ -333,11 +369,14 @@ void setLED(int red, int green, int blue) {
   analogWrite(LED_BLUE_PIN, blue);
 }
 
-String createJSONData(float tds, WaterQuality quality, float vibration) {
+String createJSONData(float tds, WaterQuality quality, float vibration, float xAxis, float yAxis, float zAxis) {
   String json = "{";
   json += "\"tds\":" + String(tds, 1);
   json += ",\"quality\":\"" + getQualityString(quality) + "\"";
-  json += ",\"vibration\":" + String(vibration, 2);
+  json += ",\"vibration\":" + String(vibration, 3);
+  json += ",\"xAxis\":" + String(xAxis, 3);
+  json += ",\"yAxis\":" + String(yAxis, 3);
+  json += ",\"zAxis\":" + String(zAxis, 3);
   json += ",\"timestamp\":" + String(millis());
   json += ",\"deviceId\":\"ESP32-Water-Sensor\"";
   json += ",\"batteryLevel\":100";  // Add battery level if you have battery monitoring

@@ -441,48 +441,61 @@ class BluetoothService {
       this.dataProcessingTimeout = null;
     }
 
-    // Gracefully stop monitoring subscription with better error handling
+    // Gracefully stop monitoring subscription with enhanced error handling
     if (this.monitoringSubscription) {
-      try {
-        // Use a promise-based approach with better error handling
-        return Promise.resolve().then(() => {
-          try {
-            if (typeof this.monitoringSubscription.remove === 'function') {
-              this.monitoringSubscription.remove();
-              console.log('✅ Monitoring subscription removed');
-            } else if (typeof this.monitoringSubscription === 'function') {
-              this.monitoringSubscription();
-              console.log('✅ Monitoring subscription called');
-            } else {
-              console.warn('⚠️ Subscription remove method not available');
-            }
-          } catch (error) {
-            console.warn('⚠️ Error removing subscription (non-critical):', error.message);
+      return new Promise((resolve) => {
+        try {
+          // Set a timeout to prevent hanging
+          const cleanupTimeout = setTimeout(() => {
+            console.log('⏰ Cleanup timeout reached, forcing completion');
+            this.monitoringSubscription = null;
+            resolve();
+          }, 2000);
+
+          // Try to remove subscription gracefully
+          const cleanup = () => {
+            clearTimeout(cleanupTimeout);
+            this.monitoringSubscription = null;
+            console.log('✅ Monitoring subscription removed');
+            resolve();
+          };
+
+          if (typeof this.monitoringSubscription.remove === 'function') {
+            this.monitoringSubscription.remove();
+            cleanup();
+          } else if (typeof this.monitoringSubscription === 'function') {
+            this.monitoringSubscription();
+            cleanup();
+          } else {
+            console.warn('⚠️ Subscription remove method not available');
+            cleanup();
           }
           
+        } catch (error) {
+          console.warn('⚠️ Error removing subscription (continuing anyway):', error.message);
           this.monitoringSubscription = null;
-          
-          // Additional cleanup - try to stop all device monitoring if available
-          if (this.device && this.manager) {
-            try {
-              this.manager.stopDeviceScan();
-              console.log('✅ Device scan stopped');
-            } catch (error) {
-              console.log('ℹ️ Device scan stop not needed or failed:', error.message);
-            }
+          resolve();
+        }
+      }).then(() => {
+        // Additional cleanup after subscription is safely removed
+        if (this.device && this.manager) {
+          try {
+            this.manager.stopDeviceScan();
+            console.log('✅ Device scan stopped');
+          } catch (error) {
+            console.log('ℹ️ Device scan stop not needed or failed:', error.message);
           }
-          
-          console.log('🏁 Stop notifications completed');
-          return Promise.resolve();
-        });
-      } catch (error) {
-        console.error('❌ Error stopping notifications:', error);
+        }
+        
+        console.log('🏁 Stop notifications completed');
+        return Promise.resolve();
+      }).catch((error) => {
+        console.error('❌ Error in stopNotifications:', error);
         this.monitoringSubscription = null;
-        return Promise.resolve(); // Don't throw, just resolve
-      }
+        return Promise.resolve(); // Always resolve to prevent hanging
+      });
     } else {
       console.log('ℹ️ No active monitoring subscription to stop');
-      console.log('🏁 Stop notifications completed');
       return Promise.resolve();
     }
   }
