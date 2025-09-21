@@ -66,7 +66,7 @@ export default function VibrationStatsScreen({ navigation }) {
         case 'dataReceived':
           // Automatically record vibration data when any sensor data is received
           if (data.data && data.data.vibration !== undefined) {
-            recordVibrationReading(data.data.vibration);
+            recordVibrationReading(data.data);
           }
           break;
       }
@@ -112,14 +112,17 @@ export default function VibrationStatsScreen({ navigation }) {
     }
   };
 
-  const recordVibrationReading = (vibrationValue) => {
+  const recordVibrationReading = (sensorData) => {
     const now = new Date();
     const timestamp = now.toISOString();
     const dateKey = now.toISOString().split('T')[0]; // YYYY-MM-DD
     const weekKey = getWeekKey(now);
 
-    // Parse vibration value (should be a number like 0.12 for m/s²)
-    const vibration = parseFloat(vibrationValue) || 0;
+    // Extract vibration and individual axis values from sensor data
+    const vibration = parseFloat(sensorData.vibration) || 0;
+    const xAxis = parseFloat(sensorData.xAxis) || 0;
+    const yAxis = parseFloat(sensorData.yAxis) || 0;
+    const zAxis = parseFloat(sensorData.zAxis) || 0;
 
     const newReading = {
       id: Date.now(),
@@ -127,10 +130,9 @@ export default function VibrationStatsScreen({ navigation }) {
       dateKey,
       weekKey,
       vibration,
-      // Simulate axis breakdown (in real implementation, ESP32 would provide these)
-      xAxis: vibration * (0.3 + Math.random() * 0.4), // 30-70% of total
-      yAxis: vibration * (0.2 + Math.random() * 0.3), // 20-50% of total
-      zAxis: vibration * (0.1 + Math.random() * 0.2)  // 10-30% of total
+      xAxis,
+      yAxis,
+      zAxis
     };
 
     // Add to readings array (keep last 1000 readings)
