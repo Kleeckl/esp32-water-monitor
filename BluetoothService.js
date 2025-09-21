@@ -71,6 +71,146 @@ class BluetoothService {
     return true;
   }
 
+  // Reset BLE scanning state
+  async resetBluetooth() {
+    console.log('🔄 Resetting Bluetooth state...');
+    try {
+      if (this.manager) {
+        // Stop any active scans
+        this.manager.stopDeviceScan();
+        
+        // Disconnect if connected
+        if (this.device && this.device.isConnected) {
+          await this.device.cancelConnection();
+        }
+        
+        // Reset internal state
+        this.device = null;
+        this.characteristic = null;
+        this.isConnected = false;
+        this.isMonitoring = false;
+        this.monitoringSubscription = null;
+        this.jsonBuffer = '';
+        
+        console.log('✅ Bluetooth state reset successfully');
+        return true;
+      }
+    } catch (error) {
+      console.error('❌ Error resetting Bluetooth:', error);
+    }
+    return false;
+  }
+
+  // Aggressive ESP32 recovery - try to find and reconnect
+  async forceESP32Recovery() {
+    console.log('🚨 Starting aggressive ESP32 recovery...');
+    try {
+      // First reset everything
+      await this.resetBluetooth();
+      
+      // Wait a moment
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Check Bluetooth state
+      const bluetoothState = await this.manager.state();
+      console.log('📡 Bluetooth state:', bluetoothState);
+      
+      if (bluetoothState !== 'PoweredOn') {
+        Alert.alert('Bluetooth Issue', 'Please turn Bluetooth off and on again, then try scanning.');
+        return false;
+      }
+      
+      // Force scan with longer duration
+      console.log('🔍 Starting extended ESP32 scan...');
+      return new Promise((resolve) => {
+        let found = false;
+        let scanTimeout;
+        let esp32Device = null;
+        
+        const scanCallback = (error, device) => {
+          if (error) {
+            console.error('Recovery scan error:', error);
+            return;
+          }
+          
+          if (device) {
+            console.log('🔍 Recovery scan found:', device.name || 'Unknown', device.id);
+            
+            // More aggressive ESP32 detection - look for our specific device ID too
+            const isESP32 = device.name && (
+              device.name.includes('ESP32') || 
+              device.name.includes('esp32') ||
+              device.name.includes('Water') ||
+              device.name.includes('XIAO') ||
+              device.name.includes('Seeed')
+            ) || device.id === 'B4:3A:45:8A:0E:62'; // Your specific ESP32 MAC
+            
+            // Also check for devices with our service UUID
+            const hasWaterService = device.serviceUUIDs && 
+              device.serviceUUIDs.includes('12345678-1234-1234-1234-123456789abc');
+            
+            if ((isESP32 || hasWaterService) && !found) {
+              found = true;
+              esp32Device = device;
+              console.log('🎯 ESP32 device recovered:', device.name || device.id);
+              this.manager.stopDeviceScan();
+              clearTimeout(scanTimeout);
+              
+              // Immediately try to connect to test if it's responsive
+              Alert.alert(
+                'ESP32 Found!', 
+                `Found: ${device.name || device.id}.\n\nAttempting connection test...`,
+                [
+                  {
+                    text: 'Test Connection',
+                    onPress: async () => {
+                      try {
+                        await this.connectToDevice(esp32Device);
+                        Alert.alert('Success!', 'ESP32 connection test successful! You can now use the device normally.');
+                      } catch (error) {
+                        Alert.alert(
+                          'Connection Test Failed', 
+                          `Device found but connection failed: ${error.message}\n\nTroubleshooting:\n1. Power cycle your ESP32\n2. Move closer to ESP32\n3. Check if ESP32 code is running properly`
+                        );
+                      }
+                    }
+                  },
+                  {
+                    text: 'Just Scan',
+                    onPress: () => {
+                      Alert.alert('Device Available', 'ESP32 found and available for connection in device list.');
+                    }
+                  }
+                ]
+              );
+              resolve(true);
+            }
+          }
+        };
+        
+        this.manager.startDeviceScan(null, null, scanCallback);
+        
+        // Extended timeout for recovery
+        scanTimeout = setTimeout(() => {
+          this.manager.stopDeviceScan();
+          if (!found) {
+            console.log('❌ ESP32 recovery scan timeout');
+            Alert.alert(
+              'ESP32 Not Found', 
+              'Troubleshooting steps:\n\n1. Check ESP32 is powered on (LEDs should be visible)\n2. Verify ESP32 code is uploaded and running\n3. Power cycle ESP32 (unplug/replug power)\n4. Move closer to ESP32 (within 3 meters)\n5. Check if other devices can see the ESP32\n6. Try restarting your phone\'s Bluetooth'
+            );
+            resolve(false);
+          }
+        }, 20000); // 20 second scan for recovery
+      });
+      
+    } catch (error) {
+      console.error('❌ ESP32 recovery failed:', error);
+      Alert.alert('Recovery Failed', 'Please restart the app and try again.');
+      return false;
+    }
+  }
+
   // Scan for ESP32 devices
   async scanForDevices(onDeviceFound) {
     if (!this.manager) {
@@ -87,6 +227,17 @@ class BluetoothService {
     if (!hasPermissions) return;
 
     try {
+      // Stop any existing scan first to reset state
+      try {
+        this.manager.stopDeviceScan();
+        console.log('🔄 Stopped existing scan for fresh start');
+      } catch (stopError) {
+        console.log('ℹ️ No existing scan to stop:', stopError.message);
+      }
+
+      // Small delay to let BLE stack reset
+      await new Promise(resolve => setTimeout(resolve, 500));
+
       // Check if Bluetooth is enabled
       const bluetoothState = await this.manager.state();
       if (bluetoothState !== 'PoweredOn') {
@@ -98,20 +249,60 @@ class BluetoothService {
       this.manager.startDeviceScan(null, null, (error, device) => {
         if (error) {
           console.error('Scan error:', error);
-          Alert.alert('Scan Error', error.message);
+          // Try to recover from scan errors
+          if (error.message.includes('already scanning') || error.message.includes('scan in progress')) {
+            console.log('🔄 Scan already in progress, attempting to reset...');
+            try {
+              this.manager.stopDeviceScan();
+              setTimeout(() => {
+                console.log('🔄 Retrying scan after reset...');
+                this.scanForDevices(onDeviceFound);
+              }, 1000);
+            } catch (resetError) {
+              console.error('❌ Failed to reset scan:', resetError);
+              Alert.alert('Scan Error', 'Please restart the app to reset Bluetooth scanning.');
+            }
+          } else {
+            Alert.alert('Scan Error', error.message);
+          }
           return;
         }
 
-        if (device && device.name) {
-          console.log('Found device:', device.name, device.id);
-          // Look for ESP32 Water Sensor specifically, plus other ESP32 devices
-          if (device.name.toLowerCase().includes('esp32-water-sensor') || 
-              device.name.toLowerCase().includes('esp32') || 
-              device.name.toLowerCase().includes('xiao') ||
-              device.name.toLowerCase().includes('seeed') ||
-              device.name === 'ESP32-Water-Sensor') {
-            console.log('✅ Compatible water sensor device found:', device.name);
-            onDeviceFound(device);
+        if (device) {
+          // Log all devices for debugging
+          console.log('Found device:', device.name || 'Unknown', device.id);
+          
+          if (device.name) {
+            // Look for ESP32 Water Sensor specifically, plus other ESP32 devices
+            if (device.name.toLowerCase().includes('esp32-water-sensor') || 
+                device.name.toLowerCase().includes('esp32') || 
+                device.name.toLowerCase().includes('xiao') ||
+                device.name.toLowerCase().includes('seeed') ||
+                device.name === 'ESP32-Water-Sensor' ||
+                device.name.includes('ESP32-Wa') ||
+                device.name.includes('ESP32') ||
+                device.name.toLowerCase().includes('water')) { // Added more patterns
+              console.log('✅ Compatible water sensor device found:', device.name);
+              onDeviceFound(device);
+            }
+          } else {
+            // Check for devices without names that might be ESP32
+            // ESP32 devices sometimes show up without names initially
+            if (device.serviceUUIDs && device.serviceUUIDs.length > 0) {
+              console.log('📡 Found unnamed device with services:', device.id, device.serviceUUIDs);
+              
+              // Check if this device has our water sensor service UUID
+              const waterSensorServiceUUID = '12345678-1234-1234-1234-123456789abc';
+              if (device.serviceUUIDs.includes(waterSensorServiceUUID)) {
+                console.log('🎯 ESP32 Water Sensor found (unnamed):', device.id);
+                // Create a device object with a friendly name for the UI
+                const namedDevice = {
+                  ...device,
+                  name: 'ESP32 Water Sensor' // Give it a display name
+                };
+                onDeviceFound(namedDevice);
+              }
+            }
           }
         }
       });
@@ -144,24 +335,70 @@ class BluetoothService {
     }
 
     try {
-      console.log('Connecting to device:', device.name);
+      console.log('🔗 Attempting to connect to device:', device.name, device.id);
       
       // Store original device info before connection
       const originalDeviceName = device.name || device.localName || 'Unknown Device';
       const originalDeviceId = device.id;
       
-      this.device = await device.connect();
-      console.log('Connected successfully');
+      // First, check if device is already connected
+      const isConnected = await device.isConnected();
+      if (isConnected) {
+        console.log('📱 Device already connected, disconnecting first...');
+        await device.cancelConnection();
+        // Wait a moment before reconnecting
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
       
-      // Preserve original device name and ID after connection
-      this.device.name = this.device.name || originalDeviceName;
-      this.device.id = this.device.id || originalDeviceId;
+      // Enhanced connection with multiple attempts and longer timeout
+      let connectionError = null;
+      let attempts = 0;
+      const maxAttempts = 3;
       
-      // Discover services and characteristics
-      await this.device.discoverAllServicesAndCharacteristics();
-      console.log('Services discovered');
+      while (attempts < maxAttempts) {
+        attempts++;
+        console.log(`🔗 Connection attempt ${attempts}/${maxAttempts}...`);
+        
+        try {
+          // Increase timeout to 15 seconds for ESP32 compatibility
+          const connectionPromise = device.connect();
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`Connection timeout after 15 seconds (attempt ${attempts})`)), 15000);
+          });
+          
+          this.device = await Promise.race([connectionPromise, timeoutPromise]);
+          console.log('✅ Connected successfully to:', originalDeviceName);
+          
+          // Preserve original device name and ID after connection
+          this.device.name = this.device.name || originalDeviceName;
+          this.device.id = this.device.id || originalDeviceId;
+          
+          // Discover services and characteristics
+          console.log('🔍 Discovering services...');
+          await this.device.discoverAllServicesAndCharacteristics();
+          console.log('✅ Services discovered');
+          
+          this.isConnected = true;
+          
+          // Success - break out of retry loop
+          connectionError = null;
+          break;
+          
+        } catch (attemptError) {
+          connectionError = attemptError;
+          console.log(`❌ Connection attempt ${attempts} failed:`, attemptError.message);
+          
+          if (attempts < maxAttempts) {
+            console.log(`⏳ Waiting 2 seconds before retry...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
+      }
       
-      this.isConnected = true;
+      // If all attempts failed, throw the last error
+      if (connectionError) {
+        throw connectionError;
+      }
       
       // Debounce connection events to prevent multiple alerts
       const now = Date.now();
@@ -189,7 +426,13 @@ class BluetoothService {
 
       return this.device;
     } catch (error) {
-      console.error('Connection error:', error);
+      console.error('❌ Connection failed:', error.message);
+      console.error('📋 Error details:', {
+        errorCode: error.errorCode,
+        reason: error.reason,
+        deviceName: device.name,
+        deviceId: device.id
+      });
       
       // Only show alert and notify if this isn't a duplicate event
       const now = Date.now();
@@ -200,9 +443,25 @@ class BluetoothService {
         this.isConnected = false;
         this.device = null;
         
+        // Provide specific error messages based on error type
+        let userMessage = 'Failed to connect to ESP32';
+        if (error.message.includes('timeout')) {
+          userMessage = 'Connection timeout - check if ESP32 is powered on and nearby';
+        } else if (error.message.includes('not found') || error.message.includes('unavailable')) {
+          userMessage = 'ESP32 not responding - try power cycling the device';
+        } else if (error.message.includes('permission')) {
+          userMessage = 'Bluetooth permission required - check app settings';
+        } else if (error.message.includes('already connected')) {
+          userMessage = 'Device already connected - try using Reset Bluetooth button';
+        }
+        
         // Notify subscribers about connection failure (not disconnection)
-        this.notifySubscribers('connectionFailed', { error: error.message });
-        Alert.alert('Connection Error', `Failed to connect: ${error.message}`);
+        this.notifySubscribers('connectionFailed', { 
+          error: error.message,
+          userMessage,
+          deviceName: device.name 
+        });
+        Alert.alert('Connection Failed', userMessage);
       } else {
         console.log('🔇 Duplicate connection error ignored');
       }
@@ -218,22 +477,71 @@ class BluetoothService {
     }
 
     try {
-      const characteristic = await this.device.readCharacteristicForService(
-        serviceUUID, 
-        characteristicUUID
-      );
+      console.log('🔍 Reading from service:', serviceUUID);
+      console.log('🔍 Reading from characteristic:', characteristicUUID);
+      
+      // First check if device is still connected
+      const isConnected = await this.device.isConnected();
+      if (!isConnected) {
+        throw new Error('Device disconnected during read operation');
+      }
+      
+      // Try to read with enhanced error handling
+      let characteristic;
+      try {
+        characteristic = await this.device.readCharacteristicForService(
+          serviceUUID, 
+          characteristicUUID
+        );
+      } catch (readError) {
+        console.error('❌ Characteristic read failed:', readError);
+        
+        // Try to discover services again if read fails
+        if (readError.message.includes('Unknown') || readError.message.includes('not found')) {
+          console.log('🔄 Re-discovering services...');
+          await this.device.discoverAllServicesAndCharacteristics();
+          
+          // Wait a moment and try again
+          await new Promise(resolve => setTimeout(resolve, 500));
+          characteristic = await this.device.readCharacteristicForService(
+            serviceUUID, 
+            characteristicUUID
+          );
+        } else {
+          throw readError;
+        }
+      }
+      
+      if (!characteristic || !characteristic.value) {
+        throw new Error('No data received from characteristic');
+      }
       
       // Decode base64 data
       const rawData = characteristic.value;
-      const decodedData = this.base64ToText(rawData);
+      console.log('📥 Raw data received (base64):', rawData);
       
-      console.log('Sensor data received:', decodedData);
+      const decodedData = this.base64ToText(rawData);
+      console.log('📝 Decoded sensor data:', decodedData);
+      
       this.notifySubscribers('dataReceived', { data: decodedData });
       
       return decodedData;
     } catch (error) {
-      console.error('Error reading sensor data:', error);
-      throw error;
+      console.error('❌ Error reading sensor data:', error);
+      console.error('📋 Error details:', {
+        errorCode: error.errorCode,
+        reason: error.reason,
+        message: error.message,
+        deviceConnected: this.isConnected,
+        deviceId: this.device?.id
+      });
+      
+      // Provide more helpful error message
+      if (error.message.includes('Unknown error')) {
+        throw new Error(`Failed to read sensor: ${error.message}. Try disconnecting and reconnecting to the ESP32.`);
+      } else {
+        throw new Error(`Failed to read sensor: ${error.message}`);
+      }
     }
   }
 
@@ -452,23 +760,50 @@ class BluetoothService {
             resolve();
           }, 2000);
 
-          // Try to remove subscription gracefully
-          const cleanup = () => {
-            clearTimeout(cleanupTimeout);
-            this.monitoringSubscription = null;
-            console.log('✅ Monitoring subscription removed');
-            resolve();
+          // Wrap the entire cleanup in a try-catch to prevent native crashes
+          const safeCleanup = () => {
+            try {
+              clearTimeout(cleanupTimeout);
+              this.monitoringSubscription = null;
+              console.log('✅ Monitoring subscription removed');
+              resolve();
+            } catch (cleanupError) {
+              console.warn('⚠️ Error during final cleanup (ignoring):', cleanupError.message);
+              this.monitoringSubscription = null;
+              resolve();
+            }
           };
 
-          if (typeof this.monitoringSubscription.remove === 'function') {
-            this.monitoringSubscription.remove();
-            cleanup();
-          } else if (typeof this.monitoringSubscription === 'function') {
-            this.monitoringSubscription();
-            cleanup();
-          } else {
-            console.warn('⚠️ Subscription remove method not available');
-            cleanup();
+          // Add extra protection around subscription removal
+          try {
+            if (this.monitoringSubscription && typeof this.monitoringSubscription.remove === 'function') {
+              // Wrap the remove call in setTimeout to isolate from main thread
+              setTimeout(() => {
+                try {
+                  this.monitoringSubscription.remove();
+                  safeCleanup();
+                } catch (removeError) {
+                  console.warn('⚠️ Subscription.remove() failed (continuing):', removeError.message);
+                  safeCleanup();
+                }
+              }, 50);
+            } else if (this.monitoringSubscription && typeof this.monitoringSubscription === 'function') {
+              setTimeout(() => {
+                try {
+                  this.monitoringSubscription();
+                  safeCleanup();
+                } catch (funcError) {
+                  console.warn('⚠️ Subscription function call failed (continuing):', funcError.message);
+                  safeCleanup();
+                }
+              }, 50);
+            } else {
+              console.warn('⚠️ Subscription remove method not available');
+              safeCleanup();
+            }
+          } catch (subscriptionError) {
+            console.warn('⚠️ Subscription handling failed (continuing):', subscriptionError.message);
+            safeCleanup();
           }
           
         } catch (error) {
@@ -478,15 +813,28 @@ class BluetoothService {
         }
       }).then(() => {
         // Additional cleanup after subscription is safely removed
-        if (this.device && this.manager) {
+        return new Promise((resolve) => {
           try {
-            this.manager.stopDeviceScan();
-            console.log('✅ Device scan stopped');
-          } catch (error) {
-            console.log('ℹ️ Device scan stop not needed or failed:', error.message);
+            if (this.device && this.manager) {
+              // Wrap device scan stop in timeout and try-catch
+              setTimeout(() => {
+                try {
+                  this.manager.stopDeviceScan();
+                  console.log('✅ Device scan stopped');
+                } catch (scanError) {
+                  console.log('ℹ️ Device scan stop not needed or failed:', scanError.message);
+                }
+                resolve();
+              }, 100);
+            } else {
+              resolve();
+            }
+          } catch (deviceError) {
+            console.log('ℹ️ Device cleanup error (ignoring):', deviceError.message);
+            resolve();
           }
-        }
-        
+        });
+      }).then(() => {
         console.log('🏁 Stop notifications completed');
         return Promise.resolve();
       }).catch((error) => {

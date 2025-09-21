@@ -77,6 +77,11 @@ class MyServerCallbacks: public BLEServerCallbacks {
       setLED(0, 0, 255);
       delay(500);
       setLED(0, 0, 0);
+      
+      // Update sensor data immediately when client connects
+      // This ensures fresh data is available for reading
+      Serial.println("Refreshing sensor data for new client...");
+      updateWaterQualityReadings();
     };
 
     void onDisconnect(BLEServer* pServer) {
@@ -163,6 +168,10 @@ void initializeBLE() {
 
   // Add descriptor for notifications
   pCharacteristic->addDescriptor(new BLE2902());
+  
+  // Set initial data so reading works immediately after connection
+  Serial.println("Setting initial sensor data...");
+  updateWaterQualityReadings();
   
   // Start the service
   pService->start();

@@ -20,6 +20,7 @@ export default function ScreenTwo({ navigation, route }) {
     deviceName: null
   });
   const [isReading, setIsReading] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [highlightedTest, setHighlightedTest] = useState(null);
   const wasReadingRef = useRef(false);
 
@@ -148,8 +149,15 @@ export default function ScreenTwo({ navigation, route }) {
       }
 
       const tds = parsedData.tds || 'N/A';
-      const vibration = parsedData.vibration || 'N/A';
+      const vibration = (parsedData.vibration !== null && parsedData.vibration !== undefined) ? parsedData.vibration : 'N/A';
       const quality = (tds !== 'N/A' && !isNaN(tds)) ? getWaterQuality(tds) : 'Unknown';
+
+      // Debug vibration data
+      if (parsedData.vibration === null) {
+        console.log('⚠️ ESP32 sent vibration: null - Check ESP32 sensor readings');
+      } else if (parsedData.vibration !== undefined) {
+        console.log('✅ ESP32 vibration data:', parsedData.vibration);
+      }
 
       return {
         tds: (tds !== 'N/A' && !isNaN(tds)) ? `${Number(tds).toFixed(1)} ppm` : 'N/A',
@@ -200,28 +208,38 @@ export default function ScreenTwo({ navigation, route }) {
     }
   };
 
-  const stopDataCollection = () => {
-    console.log('🛑 Stop data collection requested');
+  const stopDataCollection = async () => {
+    if (isStopping) {
+      console.log('� Already stopping, ignoring duplicate request');
+      return;
+    }
+    
+    console.log('�🛑 Stop data collection requested');
+    setIsStopping(true);
     setIsReading(false);
     
     try {
       // Stop notifications from the Bluetooth service with timeout protection
       if (bluetoothService && bluetoothService.stopNotifications) {
-        // Use setTimeout to prevent blocking UI
-        setTimeout(() => {
-          try {
-            bluetoothService.stopNotifications();
-            console.log('✅ Successfully requested stop of data collection');
-          } catch (innerError) {
-            console.error('❌ Inner error stopping data collection:', innerError);
-          }
-        }, 100); // Small delay to allow UI to update first
+        // Use async/await to properly handle the Promise
+        try {
+          await bluetoothService.stopNotifications();
+          console.log('✅ Successfully requested stop of data collection');
+        } catch (innerError) {
+          console.error('❌ Inner error stopping data collection:', innerError);
+          // Continue anyway - don't let BLE errors crash the app
+        }
       } else {
         console.warn('⚠️ stopNotifications method not available');
       }
     } catch (error) {
       console.error('❌ Error stopping data collection:', error);
       // Don't show alert for this error as it might be expected during BLE cleanup
+    } finally {
+      // Always reset stopping state
+      setTimeout(() => {
+        setIsStopping(false);
+      }, 1000);
     }
     
     // Show user feedback immediately (don't wait for BLE cleanup)
@@ -236,6 +254,74 @@ export default function ScreenTwo({ navigation, route }) {
     console.log('🏁 Stopped collecting sensor data');
   };
 
+  const resetBluetooth = async () => {
+    console.log('🔄 User requested Bluetooth reset');
+    try {
+      // Stop any ongoing collection first
+      if (isReading) {
+        await stopDataCollection();
+      }
+      
+      // Reset Bluetooth state
+      if (bluetoothService && bluetoothService.resetBluetooth) {
+        const success = await bluetoothService.resetBluetooth();
+        if (success) {
+          // Reset UI state
+          setConnectionStatus({
+            isConnected: false,
+            deviceName: null
+          });
+          setSensorData([]);
+          setIsReading(false);
+          setIsStopping(false);
+          
+          Alert.alert(
+            'Bluetooth Reset',
+            'Bluetooth has been reset. You can now scan for devices again.',
+            [{ text: 'OK' }]
+          );
+        } else {
+          Alert.alert('Reset Failed', 'Could not reset Bluetooth. Try restarting the app.');
+        }
+      } else {
+        Alert.alert('Reset Not Available', 'Bluetooth reset is not available in this mode.');
+      }
+    } catch (error) {
+      console.error('❌ Error resetting Bluetooth:', error);
+      Alert.alert('Reset Error', 'Failed to reset Bluetooth connection.');
+    }
+  };
+
+  const forceESP32Recovery = async () => {
+    console.log('🚨 User requested ESP32 recovery');
+    try {
+      if (bluetoothService && bluetoothService.forceESP32Recovery) {
+        Alert.alert(
+          'ESP32 Recovery',
+          'Starting aggressive ESP32 recovery scan. This may take up to 15 seconds...',
+          [{ text: 'OK' }]
+        );
+        
+        const found = await bluetoothService.forceESP32Recovery();
+        if (found) {
+          // Reset UI state for fresh connection
+          setConnectionStatus({
+            isConnected: false,
+            deviceName: null
+          });
+          setSensorData([]);
+          setIsReading(false);
+          setIsStopping(false);
+        }
+      } else {
+        Alert.alert('Recovery Not Available', 'ESP32 recovery is not available in this mode.');
+      }
+    } catch (error) {
+      console.error('❌ Error during ESP32 recovery:', error);
+      Alert.alert('Recovery Error', 'Failed to perform ESP32 recovery.');
+    }
+  };
+
   const readSingleValue = async () => {
     if (!connectionStatus.isConnected) {
       Alert.alert('No Connection', 'Please connect to your ESP32 device first.');
@@ -243,17 +329,37 @@ export default function ScreenTwo({ navigation, route }) {
     }
 
     try {
+      console.log('📡 Requesting single sensor reading from ESP32-C6...');
+      
       // Replace these UUIDs with your ESP32's actual service and characteristic UUIDs
       const serviceUUID = '12345678-1234-1234-1234-123456789abc'; // Replace with your service UUID
       const characteristicUUID = '87654321-4321-4321-4321-cba987654321'; // Replace with your characteristic UUID
       
       const data = await bluetoothService.readSensorData(serviceUUID, characteristicUUID);
-      addSensorReading(data);
-      // Success is implied by data appearing in the list, no need for alert
-      console.log('Sensor data read successfully');
+      
+      if (data && data.trim()) {
+        addSensorReading(data);
+        console.log('✅ Sensor data read successfully:', data);
+      } else {
+        console.log('⚠️ Empty or null data received from ESP32');
+        Alert.alert('No Data', 'ESP32 returned empty data. This might mean:\n\n1. Sensors are not initialized yet\n2. ESP32 code needs time to start\n3. Try waiting a moment and reading again');
+      }
     } catch (error) {
-      console.error('Error reading sensor data:', error);
-      Alert.alert('Error', `Failed to read sensor data: ${error.message}`);
+      console.error('❌ Failed to get single reading:', error);
+      
+      let errorMessage = 'Failed to read sensor data';
+      
+      if (error.message.includes('Unknown error')) {
+        errorMessage = 'ESP32 connection issue. Try:\n\n1. Reset Bluetooth in the app\n2. Power cycle your ESP32\n3. Wait 10 seconds and try again\n4. Check ESP32 serial output for errors';
+      } else if (error.message.includes('not found')) {
+        errorMessage = 'ESP32 service/characteristic not found. The ESP32 might need to be restarted.';
+      } else if (error.message.includes('disconnected')) {
+        errorMessage = 'ESP32 disconnected during read. Please reconnect and try again.';
+      } else {
+        errorMessage = `${error.message}`;
+      }
+      
+      Alert.alert('Read Error', errorMessage);
     }
   };
 
@@ -352,9 +458,10 @@ export default function ScreenTwo({ navigation, route }) {
             />
           ) : (
             <Button
-              title="Stop Collection"
+              title={isStopping ? "Stopping..." : "Stop Collection"}
               onPress={stopDataCollection}
               color="red"
+              disabled={isStopping}
             />
           )}
         </View>
@@ -364,6 +471,22 @@ export default function ScreenTwo({ navigation, route }) {
             title="Clear Data"
             onPress={clearData}
             color="orange"
+          />
+        </View>
+        
+        <View style={styles.buttonContainer}>
+          <Button
+            title="Reset Bluetooth"
+            onPress={resetBluetooth}
+            color="purple"
+          />
+        </View>
+        
+        <View style={styles.buttonContainer}>
+          <Button
+            title="Find ESP32"
+            onPress={forceESP32Recovery}
+            color="red"
           />
         </View>
       </View>
